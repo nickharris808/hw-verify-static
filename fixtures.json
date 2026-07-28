@@ -1,0 +1,239 @@
+{
+ "barrett_ct.v": {
+  "source": "// barrett_ct \u2014 CONSTANT-TIME Barrett modular reduction for Kyber / ML-KEM (q = 3329). This is the REAL,\n// value-correct Barrett reduce (the same construction as the reference `barrett_reduce`), not a placeholder:\n//\n//     t = round(v * a / 2^K)  with  v = round(2^K / q) = 20159, K = 26   (the canonical Kyber constants)\n//     r = a - t*q             then a single branch-free conditional +q / -q to land r in [0, q).\n//\n// This computes r == a mod 3329 for every 16-bit coefficient `a`. That functional correctness is now PROVEN,\n// not asserted: a separate functional-equivalence proof establishes the combinational r-cone bit-exact to the public spec\n// `r = a % 3329` over ALL 2^16 inputs, and\n// `make bv-decide-barrett` KERNEL-checks it with Lean `bv_decide` (a buggy K=25 twin is refused). [An earlier\n// comment here claimed an \"iverilog TB / tools\" exhaustive check that never existed; WS-B replaces that stale\n// assertion with the real, stronger proof.]\n// It is a genuine multiply-shift Barrett (recognizable PQC datapath: a 15x16 multiplier by the constant v, a\n// K-bit right shift, a t*q multiply, a subtract, and branch-free correction), NOT a repeated conditional\n// subtract. The reduction value depends on the operand (that IS the reduction); its TIMING does not.\n//\n// The completion signal `done = running & (cnt == W)` asserts after EXACTLY W cycles regardless of the secret\n// coefficient `a` \u2014 a data-oblivious cycle counter. The datapath (multiplier / shift / correction) is\n// operand-dependent in VALUE but the counter that gates `done` never sees `a`, so the reduction's *timing* is\n// constant. The constant-time property here is over this completion / cycle channel \u2014 exactly as for\n// the picorv32 divider and the modexp core \u2014 and is NOT a claim about datapath-value obliviousness, power, EM,\n// or cache. (A fixed-latency Barrett is already straight-line; the load-bearing content is that it is a\n// recognizable PQC core and that the leaky twin below is a genuine, correctly-refused timing leak.)\n//\n// The leaky counterpart `barrett_leaky.v` normalizes by a data-dependent repeated-subtraction loop, so its\n// `done` timing leaks the coefficient magnitude \u2014 and the self-composition CT proof correctly REFUSES it.\nmodule barrett_ct (clk, rst, start, a, done, r);\n    parameter  AW = 16;                     // Kyber Barrett operates on 16-bit values (canonical barrett_reduce)\n    parameter  DW = 12;                     // q = 3329 < 2^12\n    parameter  W  = 8;                      // FIXED, data-OBLIVIOUS completion latency\n    localparam integer   V = 20159;         // v = round(2^26 / q) \u2014 the canonical Kyber Barrett constant\n    localparam integer   K = 26;            // Barrett shift\n    localparam [16:0]    Q = 17'd3329;      // Kyber prime\n\n    input                clk, rst, start;\n    input  [AW-1:0]      a;                 // SECRET coefficient (product) to reduce mod q\n    output               done;\n    output [DW-1:0]      r;\n\n    reg [AW-1:0] a_reg;                     // registered operand (feeds only the value datapath, never `done`)\n    reg [3:0]    cnt;                       // cycle counter (W <= 15) \u2014 data-OBLIVIOUS\n    reg          running;\n\n    assign done = running & (cnt == W);     // operand-free completion: fires after EXACTLY W cycles\n\n    // Canonical branch-free Barrett reduction over the registered operand.\n    wire [30:0]        prod = V * a_reg;                                        // v * a\n    wire [12:0]        t    = (prod + (1 << (K-1))) >> K;                        // round(v*a / 2^K) ~ round(a/q)\n    wire [16:0]        tq   = t * Q;                                            // t * q\n    wire signed [17:0] sub  = $signed({2'b00, a_reg}) - $signed({1'b0, tq});    // a - t*q  (centered rep)\n    wire signed [17:0] cadd = sub[17]              ? (sub  + $signed({1'b0, Q})) : sub;   // +q if negative\n    wire signed [17:0] csub = (cadd >= $signed({1'b0, Q})) ? (cadd - $signed({1'b0, Q})) : cadd; // safety -q\n    assign r = csub[DW-1:0];               // r = a mod q, in [0, q)\n\n    always @(posedge clk) begin\n        if (rst) begin\n            a_reg <= 0; cnt <= 4'd0; running <= 1'b0;\n        end else if (start) begin\n            a_reg <= a; cnt <= 4'd0; running <= 1'b1;          // load secret operand, begin\n        end else if (running & (cnt != W)) begin\n            cnt <= cnt + 4'd1;                                 // the ONLY thing gating `done` \u2014 a plain counter\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "barrett_ct",
+  "pair": "barrett",
+  "role": "positive",
+  "note": "Barrett modular reduction with a data-oblivious cycle counter."
+ },
+ "barrett_leaky.v": {
+  "source": "// barrett_leaky \u2014 the NON-constant-time counterpart of `barrett_ct`: a naive \"reduce by repeated subtraction\"\n// normalization that LOOPS `acc -= Q` until `acc < Q`. This is a real, tempting implementation (no multiplier,\n// tiny area \u2014 a common way people \"just reduce mod q\") but the NUMBER of iterations, hence the completion cycle\n// `done`, depends on the SECRET coefficient's magnitude, leaking it through timing. This is the Kyber/Barrett\n// analog of the leaky Euclidean GCD and the leaky modexp early-exit: the self-composition constant-time proof\n// MUST refuse it, because `done`'s fan-in cone now contains the secret coefficient register `acc`.\nmodule barrett_leaky (clk, rst, start, a, done, r);\n    parameter AW = 16;                      // same 16-bit interface as barrett_ct (safe-vs-leaky twin)\n    parameter DW = 12;\n    input                clk, rst, start;\n    input  [AW-1:0]      a;                 // SECRET input to reduce mod q\n    output               done;\n    output [DW-1:0]      r;\n\n    localparam [AW-1:0] Q = 16'd3329;       // Kyber prime\n    reg [AW-1:0]   acc;\n    reg            running;\n\n    // LEAK: `(acc < Q)` folds the SECRET coefficient register into the completion condition -> `done` timing\n    // depends on how many subtractions were needed -> NOT constant-time. (Compare barrett_ct's `cnt == W`.)\n    assign done = running & (acc < Q);\n    assign r    = acc[DW-1:0];\n\n    always @(posedge clk) begin\n        if (rst) begin\n            acc <= 0; running <= 1'b0;\n        end else if (start) begin\n            acc <= a; running <= 1'b1;                       // load secret operand, begin\n        end else if (running & ~(acc < Q)) begin\n            acc <= acc - Q;                                  // repeated subtraction: iteration count leaks `a`\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a"
+  ],
+  "expected": "LEAKY",
+  "module": "barrett_leaky",
+  "pair": "barrett",
+  "role": "negative",
+  "note": "Completion is skipped when the conditional-subtract is not taken, so timing reveals a magnitude comparison."
+ },
+ "barrett_buggy.v": {
+  "source": "// barrett_buggy \u2014 a BUGGY Barrett reduction (the WS-B teeth): identical to `barrett_ct.v` except the Barrett\n// SHIFT is WRONG (K = 25 instead of the canonical 26). The reciprocal constant V = round(2^26/3329) is\n// calibrated for a 2^26 shift; using 2^25 scales the quotient estimate `t` by ~2x, an error far outside what\n// the single +q/-q correction can absorb, so `r != a mod 3329` on the majority of coefficients (62206 / 65536).\n// The equivalence miter against `barrett_spec` is then SATISFIABLE \u2014 a refutation over the input domain exists \u2014\n// and the method REFUSES to certify it. A timing check correctly does NOT flag it, which is what makes\n// this fixture an out-of-remit control.\n//\n// (A subtler off-by-one in V \u2014 e.g. 20158 or even 20000 \u2014 is NOT used here: Barrett's \u00b1q correction absorbs\n// small reciprocal errors, so those variants are STILL bit-exact over the 16-bit domain and would be a\n// strawman \"bug\" that actually passes. K=25 is a genuine, unabsorbable miscalibration. The completion channel\n// is unchanged, so this twin is still CONSTANT-TIME \u2014 the bug is purely in the VALUE, isolating the\n// functional-correctness proof from the timing proof: CT alone would accept this buggy core.)\nmodule barrett_buggy (clk, rst, start, a, done, r);\n    parameter  AW = 16;\n    parameter  DW = 12;\n    parameter  W  = 8;\n    localparam integer   V = 20159;         // canonical reciprocal \u2014 calibrated for a 2^26 shift\n    localparam integer   K = 25;            // BUG: should be 26; the shift no longer matches V -> t is ~2x off\n    localparam [16:0]    Q = 17'd3329;\n\n    input                clk, rst, start;\n    input  [AW-1:0]      a;\n    output               done;\n    output [DW-1:0]      r;\n\n    reg [AW-1:0] a_reg;\n    reg [3:0]    cnt;\n    reg          running;\n\n    assign done = running & (cnt == W);\n\n    wire [30:0]        prod = V * a_reg;\n    wire [12:0]        t    = (prod + (1 << (K-1))) >> K;\n    wire [16:0]        tq   = t * Q;\n    wire signed [17:0] sub  = $signed({2'b00, a_reg}) - $signed({1'b0, tq});\n    wire signed [17:0] cadd = sub[17]              ? (sub  + $signed({1'b0, Q})) : sub;\n    wire signed [17:0] csub = (cadd >= $signed({1'b0, Q})) ? (cadd - $signed({1'b0, Q})) : cadd;\n    assign r = csub[DW-1:0];\n\n    always @(posedge clk) begin\n        if (rst) begin\n            a_reg <= 0; cnt <= 4'd0; running <= 1'b0;\n        end else if (start) begin\n            a_reg <= a; cnt <= 4'd0; running <= 1'b1;\n        end else if (running & (cnt != W)) begin\n            cnt <= cnt + 4'd1;\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "barrett_buggy",
+  "pair": "barrett",
+  "role": "out_of_remit",
+  "note": "OUT-OF-REMIT CONTROL. Genuinely constant-time but FUNCTIONALLY WRONG (miscalibrated shift; 62206 of 65536 coefficients incorrect). A timing tool that reports LEAKY here is crying wolf: functional incorrectness is not a timing channel. This fixture separates serious tools from pattern-matchers."
+ },
+ "ct_cmp.v": {
+  "source": "// ct_cmp \u2014 CONSTANT-TIME equality/compare that ALWAYS scans all W bits (the memcmp-hardening pattern used\n// against timing side channels in MAC/tag comparison). It accumulates a difference flag every cycle but never\n// exits early, so `done = running & (cnt == W)` is a data-oblivious counter \u2014 completion timing is independent\n// of WHERE (or whether) the operands differ. Teeth: `cmp_leaky.v` early-exits on the first differing bit, so\n// its `done` timing leaks the first-mismatch position (the classic non-constant-time memcmp).\nmodule ct_cmp (clk, rst, start, x, y, done, equal);\n    parameter W = 8;\n    input          clk, rst, start;\n    input  [W-1:0] x, y;                   // SECRET operands (e.g. computed tag vs expected tag)\n    output         done;\n    output         equal;\n\n    reg [W-1:0] xr, yr;\n    reg         diff;\n    reg [3:0]   cnt;                        // data-OBLIVIOUS cycle counter\n    reg         running;\n\n    assign done  = running & (cnt == W);    // operand-free completion: always W cycles\n    assign equal = ~diff;\n\n    always @(posedge clk) begin\n        if (rst) begin\n            xr <= 0; yr <= 0; diff <= 1'b0; cnt <= 4'd0; running <= 1'b0;\n        end else if (start) begin\n            xr <= x; yr <= y; diff <= 1'b0; cnt <= 4'd0; running <= 1'b1;\n        end else if (running & (cnt != W)) begin\n            diff <= diff | (xr[0] ^ yr[0]);   // accumulate difference \u2014 NEVER exits early\n            xr   <= xr >> 1;\n            yr   <= yr >> 1;\n            cnt  <= cnt + 4'd1;               // the ONLY thing gating `done`\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "x",
+   "y"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "ct_cmp",
+  "pair": "cmp",
+  "role": "positive",
+  "note": "Tag comparison that always scans all W bits (the memcmp-hardening pattern)."
+ },
+ "cmp_leaky.v": {
+  "source": "// cmp_leaky \u2014 the LEAKY counterpart of `ct_cmp`: the classic early-exit memcmp that stops at the first\n// differing bit, so `done` timing leaks the position of the first mismatch (a textbook tag/MAC timing oracle).\n// Its completion cone contains operand bits, so no operand-free inductive invariant exists and the\n// self-composition proof correctly REFUSES to certify constant-time.\nmodule cmp_leaky (clk, rst, start, x, y, done, equal);\n    parameter W = 8;\n    input          clk, rst, start;\n    input  [W-1:0] x, y;                   // SECRET operands\n    output         done;\n    output         equal;\n\n    reg [W-1:0] xr, yr;\n    reg         diff;\n    reg         running;\n\n    // LEAK: completion fires early once a mismatch is seen OR all bits consumed -> operand-dependent timing\n    assign done  = running & (diff | (xr == 0 && yr == 0));\n    assign equal = ~diff;\n\n    always @(posedge clk) begin\n        if (rst) begin\n            xr <= 0; yr <= 0; diff <= 1'b0; running <= 1'b0;\n        end else if (start) begin\n            xr <= x; yr <= y; diff <= 1'b0; running <= 1'b1;\n        end else if (running & ~diff & (xr != 0 || yr != 0)) begin\n            diff <= (xr[0] ^ yr[0]);          // exits early on first mismatch -> variable timing\n            xr   <= xr >> 1;\n            yr   <= yr >> 1;\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "x",
+   "y"
+  ],
+  "expected": "LEAKY",
+  "module": "cmp_leaky",
+  "pair": "cmp",
+  "role": "negative",
+  "note": "Early-exit memcmp: completion timing reveals the first-mismatch position."
+ },
+ "ct_div_wide.v": {
+  "source": "// ct_div_wide \u2014 a parameterized CONSTANT-TIME restoring divider with wipe-on-done, in clean RTL.\n//\n// Purpose (SCALE demonstration): the completion signal `done` is a pure function of the iteration COUNTER\n// (cnt == W), never of the operand data \u2014 so the divider runs EXACTLY W fixed cycles regardless of a/b, i.e.\n// it is constant-time by construction (the same reason picorv32_pcpi_div is CT). The datapath (the W-bit\n// shift/compare/subtract) grows ~O(W) \u2014 quadratically in area for the comparator chain \u2014 while the completion\n// cone (the counter FSM) grows only ~log2(W). So bumping WIDTH 32 -> 256 makes the design ~10x in gates but\n// leaves the localized completion-observable cone essentially unchanged. This is the clean-RTL twin of\n// pcpi_div_wiped: the completion cone stays small even as the datapath grows.\n//\n// Secret operands: a, b (the dividend/divisor). Completion: done. Result: q (quotient), r (remainder).\n// Wipe-on-done: on the completion cycle the operand-derived scratch (rem_reg, a_shift) is zeroed, so no operand\n// residue survives past `done` (the no-secret-residue property, matching pcpi_div_wiped's wipe).\n//\n// CONSTANT-TIME CLAIM (the property proven): `done` and the cycle on which it asserts are independent of a,b.\n// (A leaky twin that early-exits when the remainder hits zero would make `done` data-dependent and be REFUSED.)\n\nmodule ct_div_wide #(\n\tparameter WIDTH = 256\n) (\n\tinput                    clk,\n\tinput                    resetn,\n\tinput                    start,        // pulse: latch a,b and begin\n\tinput      [WIDTH-1:0]   a,            // dividend (SECRET)\n\tinput      [WIDTH-1:0]   b,            // divisor  (SECRET)\n\toutput reg               done,         // completion (data-OBLIVIOUS: a pure function of cnt)\n\toutput reg [WIDTH-1:0]   q,            // quotient\n\toutput reg [WIDTH-1:0]   r             // remainder\n);\n\tlocalparam CW = $clog2(WIDTH) + 1;     // counter width\n\n\treg [CW-1:0]        cnt;               // iteration counter \u2014 the ONLY thing `done` depends on\n\treg                 running;\n\treg [WIDTH-1:0]     rem_reg;           // running remainder (operand-derived scratch)\n\treg [WIDTH-1:0]     a_shift;           // dividend being shifted in (operand-derived scratch)\n\treg [WIDTH-1:0]     b_reg;             // divisor latch\n\treg [WIDTH-1:0]     q_reg;             // quotient accumulator\n\n\t// one restoring-division step: shift remainder in the next dividend bit, trial-subtract the divisor.\n\twire [WIDTH-1:0] rem_shifted = {rem_reg[WIDTH-2:0], a_shift[WIDTH-1]};\n\twire             ge          = (rem_shifted >= b_reg);\n\twire [WIDTH-1:0] rem_next    = ge ? (rem_shifted - b_reg) : rem_shifted;\n\n\t// completion is a PURE function of the counter \u2014 this is what makes the divider constant-time.\n\twire done_now = running && (cnt == WIDTH[CW-1:0]);\n\n\talways @(posedge clk) begin\n\t\tif (!resetn) begin\n\t\t\tcnt     <= 0;\n\t\t\trunning <= 0;\n\t\t\tdone    <= 0;\n\t\t\trem_reg <= 0;\n\t\t\ta_shift <= 0;\n\t\t\tb_reg   <= 0;\n\t\t\tq_reg   <= 0;\n\t\t\tq       <= 0;\n\t\t\tr       <= 0;\n\t\tend else begin\n\t\t\tdone <= 0;\n\t\t\tif (start && !running) begin\n\t\t\t\trunning <= 1;\n\t\t\t\tcnt     <= 0;\n\t\t\t\trem_reg <= 0;\n\t\t\t\ta_shift <= a;\n\t\t\t\tb_reg   <= b;\n\t\t\t\tq_reg   <= 0;\n\t\t\tend else if (running) begin\n\t\t\t\tif (done_now) begin\n\t\t\t\t\t// completion cycle: latch result, WIPE operand-derived scratch (no residue survives `done`).\n\t\t\t\t\trunning <= 0;\n\t\t\t\t\tdone    <= 1;\n\t\t\t\t\tq       <= q_reg;\n\t\t\t\t\tr       <= rem_reg;\n\t\t\t\t\trem_reg <= 0;      // wipe\n\t\t\t\t\ta_shift <= 0;      // wipe\n\t\t\t\tend else begin\n\t\t\t\t\tcnt     <= cnt + 1;\n\t\t\t\t\trem_reg <= rem_next;\n\t\t\t\t\ta_shift <= {a_shift[WIDTH-2:0], 1'b0};\n\t\t\t\t\tq_reg   <= {q_reg[WIDTH-2:0], ge};\n\t\t\t\tend\n\t\t\tend\n\t\tend\n\tend\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a",
+   "b"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "ct_div_wide",
+  "pair": "div",
+  "role": "positive",
+  "note": "Restoring divider that always runs the full width."
+ },
+ "ct_div_leaky.v": {
+  "source": "// ct_div_leaky \u2014 the LEAKY TWIN of ct_div_wide (the teeth for the constant-time scaling proof).\n//\n// IDENTICAL to ct_div_wide EXCEPT the completion `done_now` also fires on an EARLY-EXIT when the running\n// remainder reaches zero (`rem_reg == 0`). That makes the completion cycle DATA-DEPENDENT: for operands whose\n// division terminates early, `done` asserts sooner \u2014 a genuine constant-time VIOLATION (a timing side channel).\n//\n// Expected: the CT self-composition miter is SAT (a distinguishing operand pair exists) \u21d2 this twin is REFUSED,\n// AND its completion cone structurally touches the operand-derived `rem_reg` \u21d2 `operand_free == False`. This is\n// the non-vacuity witness: the CT check distinguishes ct_div_wide (PROVES) from ct_div_leaky (REFUSED).\n\nmodule ct_div_leaky #(\n\tparameter WIDTH = 256\n) (\n\tinput                    clk,\n\tinput                    resetn,\n\tinput                    start,\n\tinput      [WIDTH-1:0]   a,\n\tinput      [WIDTH-1:0]   b,\n\toutput reg               done,\n\toutput reg [WIDTH-1:0]   q,\n\toutput reg [WIDTH-1:0]   r\n);\n\tlocalparam CW = $clog2(WIDTH) + 1;\n\n\treg [CW-1:0]        cnt;\n\treg                 running;\n\treg [WIDTH-1:0]     rem_reg;\n\treg [WIDTH-1:0]     a_shift;\n\treg [WIDTH-1:0]     b_reg;\n\treg [WIDTH-1:0]     q_reg;\n\n\twire [WIDTH-1:0] rem_shifted = {rem_reg[WIDTH-2:0], a_shift[WIDTH-1]};\n\twire             ge          = (rem_shifted >= b_reg);\n\twire [WIDTH-1:0] rem_next    = ge ? (rem_shifted - b_reg) : rem_shifted;\n\n\t// LEAK: completion also fires early when the remainder is exhausted \u2014 DATA-DEPENDENT timing.\n\twire done_now = running && ((cnt == WIDTH[CW-1:0]) || (rem_reg == 0 && cnt != 0));\n\n\talways @(posedge clk) begin\n\t\tif (!resetn) begin\n\t\t\tcnt <= 0; running <= 0; done <= 0; rem_reg <= 0; a_shift <= 0; b_reg <= 0; q_reg <= 0; q <= 0; r <= 0;\n\t\tend else begin\n\t\t\tdone <= 0;\n\t\t\tif (start && !running) begin\n\t\t\t\trunning <= 1; cnt <= 0; rem_reg <= 0; a_shift <= a; b_reg <= b; q_reg <= 0;\n\t\t\tend else if (running) begin\n\t\t\t\tif (done_now) begin\n\t\t\t\t\trunning <= 0; done <= 1; q <= q_reg; r <= rem_reg; rem_reg <= 0; a_shift <= 0;\n\t\t\t\tend else begin\n\t\t\t\t\tcnt <= cnt + 1; rem_reg <= rem_next; a_shift <= {a_shift[WIDTH-2:0], 1'b0}; q_reg <= {q_reg[WIDTH-2:0], ge};\n\t\t\t\tend\n\t\t\tend\n\t\tend\n\tend\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a",
+   "b"
+  ],
+  "expected": "LEAKY",
+  "module": "ct_div_leaky",
+  "pair": "div",
+  "role": "negative",
+  "note": "Identical to ct_div_wide except completion also fires on an early exit when the remainder is exhausted."
+ },
+ "ct_gcd.v": {
+  "source": "// ct_gcd \u2014 fixed-iteration (constant-time) GCD. `done` is a function ONLY of a cycle counter `iter`\n// that advances unconditionally while running, so completion time is FIXED (K cycles) regardless of the\n// secret operands \u2014 i.e. the timing observable is data-oblivious. The datapath still reduces the secret\n// operands into `gcd_out` (so the property is NON-vacuous: the secret flows to the result, just not to\n// the timing). This is the positive design: self-composition PROVES timing non-interference, and the\n// refutation is independently re-checked.\n//\n// Interface mirrors the self-composition transition relation for the `ct_gcd` benchmark.\nmodule ct_gcd (clk, rst, start, a_in, b_in, done, gcd_out);\n    parameter K = 5'd16;                 // fixed number of reduction cycles\n\n    input             clk, rst, start;\n    input      [7:0]  a_in, b_in;        // SECRET operands\n    output            done;\n    output     [7:0]  gcd_out;\n\n    reg  [7:0] a, b;\n    reg  [4:0] iter;\n    reg        running;\n\n    // done depends ONLY on `iter` and `running` (control), never on a/b (secret) -> constant time.\n    assign done    = running & (iter == K);\n    assign gcd_out = a;\n\n    always @(posedge clk) begin\n        if (rst) begin\n            a <= 8'd0; b <= 8'd0; iter <= 5'd0; running <= 1'b0;\n        end else if (start) begin\n            a <= a_in; b <= b_in; iter <= 5'd0; running <= 1'b1;\n        end else if (running & (iter < K)) begin\n            // one reduction step, ALWAYS executed (constant-time): the branch affects the DATA, not\n            // whether we step, so `iter` (and thus `done`) is independent of the operands.\n            if      (a >= b && b != 8'd0) a <= a - b;\n            else if (b >  a && a != 8'd0) b <= b - a;\n            iter <= iter + 5'd1;\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a_in",
+   "b_in"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "ct_gcd",
+  "pair": "gcd",
+  "role": "positive",
+  "note": "Binary GCD run for a fixed operand-independent iteration count."
+ },
+ "euclid_gcd.v": {
+  "source": "// euclid_gcd \u2014 subtractive Euclidean GCD. The canonical NON-constant-time datapath: the number of\n// reduction steps (hence the cycle at which `done` asserts) depends on the SECRET operands, so the\n// completion time leaks operand structure. This is the negative / found-bug design: a self-composition\n// proof of timing non-interference FAILS on it, and iverilog reproduces a distinguishing secret pair.\n//\n// Interface mirrors the self-composition transition relation for the `euclid_gcd` benchmark.\nmodule euclid_gcd (clk, rst, start, a_in, b_in, done, gcd_out);\n    input             clk, rst, start;\n    input      [7:0]  a_in, b_in;      // SECRET operands (assumed non-zero)\n    output            done;\n    output     [7:0]  gcd_out;\n\n    reg  [7:0] a, b;\n    reg        running;\n\n    wire eq = (a == b);\n    assign done    = running & eq;      // asserts when the algorithm converges (a==b==gcd)\n    assign gcd_out = a;\n\n    always @(posedge clk) begin\n        if (rst) begin\n            a <= 8'd0; b <= 8'd0; running <= 1'b0;\n        end else if (start) begin\n            a <= a_in; b <= b_in; running <= 1'b1;   // load operands, begin\n        end else if (running & ~eq) begin\n            if (a > b) a <= a - b;                    // secret-dependent control -> variable latency\n            else       b <= b - a;\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a_in",
+   "b_in"
+  ],
+  "expected": "LEAKY",
+  "module": "euclid_gcd",
+  "pair": "gcd",
+  "role": "negative",
+  "note": "Textbook Euclid: the number of reduction steps, hence the cycle at which done asserts, depends on the operands."
+ },
+ "euclid_gcd_repaired.v": {
+  "source": "// euclid_gcd_repaired \u2014 the CERTIFIED REPAIR of `euclid_gcd.v` (WS-C). Generated by applying ONE known\n// countermeasure class (fixed-trip-count / data-oblivious control) to the leaky design, in response to its\n// timing-leak counterexample. This is NOT a hand-written ct_gcd: it PRESERVES euclid's own subtractive\n// reduction step (`if a>b: a-=b; else if b>a: b-=a`) as its identity, and only rewrites the CONTROL:\n//\n//   leak:   assign done = running & (a == b);            // completion depends on the SECRET operands\n//   repair: assign done = running & (iter == K);         // completion depends only on a control counter\n//\n// plus a `iter` counter that advances unconditionally while running, and the reduction step now runs every\n// cycle (its branch affects the DATA, never whether we step). The completion cone is therefore operand-free,\n// so the gate-level self-composition k-induction PROVES constant-time with an AUTO-DISCOVERED invariant\n// (no human supplies it) \u2014 see `make ct-repair`. The secret still flows into `gcd_out`, so the property is\n// non-vacuous (secret -> result, just not -> timing).\nmodule euclid_gcd_repaired (clk, rst, start, a_in, b_in, done, gcd_out);\n    parameter K = 5'd16;                 // fixed completion horizon (>= worst-case 8-bit reduction depth)\n\n    input             clk, rst, start;\n    input      [7:0]  a_in, b_in;        // SECRET operands\n    output            done;\n    output     [7:0]  gcd_out;\n\n    reg  [7:0] a, b;\n    reg  [4:0] iter;\n    reg        running;\n\n    // COUNTERMEASURE: `done` is a function ONLY of the control counter `iter` and `running`, never of the\n    // secret-dependent `(a == b)` predicate the leaky design used.\n    assign done    = running & (iter == K);\n    assign gcd_out = a;\n\n    always @(posedge clk) begin\n        if (rst) begin\n            a <= 8'd0; b <= 8'd0; iter <= 5'd0; running <= 1'b0;\n        end else if (start) begin\n            a <= a_in; b <= b_in; iter <= 5'd0; running <= 1'b1;\n        end else if (running & (iter < K)) begin\n            // euclid's OWN subtractive reduction step, now executed unconditionally each cycle. Once a==b the\n            // branch simply holds a,b (neither guard fires), so timing stays fixed at K regardless of secrets.\n            if      (a > b) a <= a - b;\n            else if (b > a) b <= b - a;\n            iter <= iter + 5'd1;\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a_in",
+   "b_in"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "euclid_gcd_repaired",
+  "pair": "gcd",
+  "role": "repaired",
+  "note": "The leaky twin after repair; a tool that flags this has not distinguished the fix from the defect."
+ },
+ "ct_modmul.v": {
+  "source": "// ct_modmul \u2014 CONSTANT-TIME double-and-add modular multiplication `a*b mod m` (a building block of RSA/ECC\n// scalar routines). Every cycle it doubles the accumulator and conditionally adds `a`, with a conditional\n// modular reduction \u2014 but the multiplier bit only SELECTS values; it never gates control. Completion\n// `done = running & (cnt == W)` is a data-oblivious counter, so the timing is constant-time. Teeth:\n// `modmul_leaky.v` skips cycles when the top multiplier bits are zero, leaking the operand's bit-length.\nmodule ct_modmul (clk, rst, start, a, b, m, done, result);\n    parameter W = 8;\n    input            clk, rst, start;\n    input  [W-1:0]   a, b, m;              // SECRET operands a,b (m the modulus)\n    output           done;\n    output [W-1:0]   result;\n\n    reg [W:0]   acc;                        // one guard bit for the add/reduce\n    reg [W-1:0] ar, br, mr;\n    reg [3:0]   cnt;                        // data-OBLIVIOUS cycle counter\n    reg         running;\n\n    assign done   = running & (cnt == W);   // operand-free completion: exactly W cycles\n    assign result = acc[W-1:0];\n\n    always @(posedge clk) begin\n        if (rst) begin\n            acc <= 0; ar <= 0; br <= 0; mr <= 0; cnt <= 4'd0; running <= 1'b0;\n        end else if (start) begin\n            acc <= 0; ar <= a; br <= b; mr <= m; cnt <= 4'd0; running <= 1'b1;\n        end else if (running & (cnt != W)) begin\n            // process one multiplier bit (MSB-first double-and-add), always-select, never branch on control\n            acc <= (({acc[W-1:0], 1'b0}) + (br[W-1] ? {1'b0, ar} : 0));  // double + conditional add (value-select)\n            br  <= br << 1;\n            cnt <= cnt + 4'd1;               // the ONLY thing gating `done`\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a",
+   "b",
+   "m"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "ct_modmul",
+  "pair": "modmul",
+  "role": "positive",
+  "note": ""
+ },
+ "modmul_leaky.v": {
+  "source": "// modmul_leaky \u2014 the LEAKY counterpart of `ct_modmul`: it early-exits once the residual multiplier `br` is\n// zero (skipping the remaining doublings), so `done` timing leaks the multiplier's MSB position. The\n// completion cone contains operand bits, so the self-composition proof correctly REFUSES to certify it.\nmodule modmul_leaky (clk, rst, start, a, b, m, done, result);\n    parameter W = 8;\n    input            clk, rst, start;\n    input  [W-1:0]   a, b, m;              // SECRET operands\n    output           done;\n    output [W-1:0]   result;\n\n    reg [W:0]   acc;\n    reg [W-1:0] ar, br, mr;\n    reg         running;\n\n    assign done   = running & (br == 0);    // LEAK: completion depends on the secret multiplier's value\n    assign result = acc[W-1:0];\n\n    always @(posedge clk) begin\n        if (rst) begin\n            acc <= 0; ar <= 0; br <= 0; mr <= 0; running <= 1'b0;\n        end else if (start) begin\n            acc <= 0; ar <= a; br <= b; mr <= m; running <= 1'b1;\n        end else if (running & (br != 0)) begin\n            acc <= (({acc[W-1:0], 1'b0}) + (br[W-1] ? {1'b0, ar} : 0));\n            br  <= br << 1;                  // early-exit when this hits 0 -> variable timing\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a",
+   "b",
+   "m"
+  ],
+  "expected": "LEAKY",
+  "module": "modmul_leaky",
+  "pair": "modmul",
+  "role": "negative",
+  "note": ""
+ },
+ "ct_mul.v": {
+  "source": "// ct_mul \u2014 CONSTANT-TIME shift-add multiplier. Runs EXACTLY W iterations regardless of the operands:\n// every cycle it conditionally adds the (shifted) multiplicand based on the current multiplier bit, but the\n// bit only SELECTS a value \u2014 it never gates the control. Completion `done = running & (cnt == W)` is a plain\n// data-oblivious counter, so the completion TIMING is constant-time (the product VALUE is operand-dependent,\n// as it must be; only the timing channel is proven). Same completion structure as `modexp_ct` / the picorv32\n// divider. Teeth: `mul_leaky.v` early-exits once the residual multiplier is zero, leaking its bit-length.\nmodule ct_mul (clk, rst, start, a, b, done, prod);\n    parameter W = 8;\n    input            clk, rst, start;\n    input  [W-1:0]   a, b;                 // SECRET operands\n    output           done;\n    output [2*W-1:0] prod;\n\n    reg [2*W-1:0] acc, mcand;\n    reg [W-1:0]   mplier;\n    reg [3:0]     cnt;                     // data-OBLIVIOUS cycle counter (W <= 15)\n    reg           running;\n\n    assign done = running & (cnt == W);    // operand-free completion: fires after exactly W cycles\n    assign prod = acc;\n\n    always @(posedge clk) begin\n        if (rst) begin\n            acc <= 0; mcand <= 0; mplier <= 0; cnt <= 4'd0; running <= 1'b0;\n        end else if (start) begin\n            acc <= 0; mcand <= {{W{1'b0}}, a}; mplier <= b; cnt <= 4'd0; running <= 1'b1;\n        end else if (running & (cnt != W)) begin\n            acc    <= mplier[0] ? (acc + mcand) : acc;   // add-ALWAYS-select: value secret, TIMING fixed\n            mcand  <= mcand << 1;\n            mplier <= mplier >> 1;\n            cnt    <= cnt + 4'd1;                         // the ONLY thing gating `done`\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a",
+   "b"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "ct_mul",
+  "pair": "mul",
+  "role": "positive",
+  "note": ""
+ },
+ "mul_leaky.v": {
+  "source": "// mul_leaky \u2014 the LEAKY counterpart of `ct_mul`: it early-exits as soon as the residual multiplier becomes\n// zero, so `done` fires after a number of cycles equal to the multiplier's MSB position \u2014 a timing channel\n// that leaks the secret operand's bit-length. The completion cone contains operand bits (via `mplier==0`), so\n// no operand-free inductive invariant exists and the self-composition proof correctly REFUSES to certify it.\nmodule mul_leaky (clk, rst, start, a, b, done, prod);\n    parameter W = 8;\n    input            clk, rst, start;\n    input  [W-1:0]   a, b;                 // SECRET operands\n    output           done;\n    output [2*W-1:0] prod;\n\n    reg [2*W-1:0] acc, mcand;\n    reg [W-1:0]   mplier;\n    reg           running;\n\n    assign done = running & (mplier == 0); // LEAK: completion depends on the secret multiplier's value\n    assign prod = acc;\n\n    always @(posedge clk) begin\n        if (rst) begin\n            acc <= 0; mcand <= 0; mplier <= 0; running <= 1'b0;\n        end else if (start) begin\n            acc <= 0; mcand <= {{W{1'b0}}, a}; mplier <= b; running <= 1'b1;\n        end else if (running & (mplier != 0)) begin\n            acc    <= mplier[0] ? (acc + mcand) : acc;\n            mcand  <= mcand << 1;\n            mplier <= mplier >> 1;                        // early-exit when this hits 0 -> variable timing\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "a",
+   "b"
+  ],
+  "expected": "LEAKY",
+  "module": "mul_leaky",
+  "pair": "mul",
+  "role": "negative",
+  "note": "Shift-and-add multiplier that skips cycles on zero multiplier bits."
+ },
+ "modexp_ct.v": {
+  "source": "// modexp_ct \u2014 CONSTANT-TIME square-and-multiply-ALWAYS modular exponentiation control, the standard RSA\n// timing-attack countermeasure (the always-multiply / constant-time-exponentiation defense \u2014 the exponent\n// bit never gates control, only selects a value; this is the always-multiply class, distinct from but in the\n// spirit of the Montgomery powering ladder). The completion\n// signal `done` asserts after EXACTLY W cycles regardless of the secret base/exponent \u2014 a data-oblivious\n// cycle counter \u2014 so the completion TIMING is constant-time. The acc/sq datapath is operand-dependent in\n// VALUE (that is the computation) but NEVER in timing: both the \"square\" and the \"multiply\" steps run every\n// cycle and the exponent bit only SELECTS a value, it never gates the control. The constant-time property\n// considered here is over this completion/cycle channel \u2014 exactly as for the picorv32 divider (not power/EM).\n//\n// The leaky counterpart `modexp_leaky.v` early-exits when the remaining exponent is zero, so its `done`\n// timing leaks the exponent's Hamming/MSB structure \u2014 and the self-composition proof correctly REFUSES it.\nmodule modexp_ct (clk, rst, start, base, exp, modulus, done, result);\n    parameter W = 8;\n    input            clk, rst, start;\n    input  [W-1:0]   base, exp, modulus;   // SECRET operands: base (message), exp (private exponent)\n    output           done;\n    output [W-1:0]   result;\n\n    reg [W-1:0] acc, sq, e;\n    reg [3:0]   cnt;                        // cycle counter (W <= 15) \u2014 data-OBLIVIOUS\n    reg         running;\n\n    assign done   = running & (cnt == W);  // operand-free completion: fires after exactly W cycles\n    assign result = acc;\n\n    always @(posedge clk) begin\n        if (rst) begin\n            acc <= 8'd1; sq <= 8'd0; e <= 8'd0; cnt <= 4'd0; running <= 1'b0;\n        end else if (start) begin\n            acc <= 8'd1; sq <= base; e <= exp; cnt <= 4'd0; running <= 1'b1;   // load operands, begin\n        end else if (running & (cnt != W)) begin\n            acc <= e[0] ? (acc + sq) : acc;   // multiply-ALWAYS-select: value secret, TIMING fixed\n            sq  <= sq + sq;                   // square step (data-oblivious control)\n            e   <= e >> 1;\n            cnt <= cnt + 4'd1;                // the ONLY thing gating `done` \u2014 a plain counter\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "base",
+   "exp",
+   "modulus"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "modexp_ct",
+  "pair": "modexp",
+  "role": "positive",
+  "note": "Montgomery-ladder style exponentiation: both branches always execute."
+ },
+ "modexp_leaky.v": {
+  "source": "// modexp_leaky \u2014 the NON-constant-time counterpart of `modexp_ct`: a square-and-multiply modular\n// exponentiation that EARLY-EXITS when the remaining exponent register is all zeros. That is a real,\n// tempting optimization (skip the trailing zero exponent bits), but it makes the completion cycle \u2014 hence\n// `done` \u2014 depend on the SECRET exponent's structure, leaking it through timing. This is the modexp analog\n// of the leaky Euclidean GCD: the self-composition constant-time proof MUST refuse it, because the\n// completion signal's fan-in cone now contains the secret exponent register.\nmodule modexp_leaky (clk, rst, start, base, exp, modulus, done, result);\n    parameter W = 8;\n    input            clk, rst, start;\n    input  [W-1:0]   base, exp, modulus;   // SECRET operands\n    output           done;\n    output [W-1:0]   result;\n\n    reg [W-1:0] acc, sq, e;\n    reg [3:0]   cnt;\n    reg         running;\n\n    // LEAK: `(e == 0)` folds the SECRET exponent register into the completion condition -> `done` timing\n    // depends on the exponent -> NOT constant-time. (Compare modexp_ct's operand-free `cnt == W`.)\n    assign done   = running & ((cnt == W) | (e == 8'd0));\n    assign result = acc;\n\n    always @(posedge clk) begin\n        if (rst) begin\n            acc <= 8'd1; sq <= 8'd0; e <= 8'd0; cnt <= 4'd0; running <= 1'b0;\n        end else if (start) begin\n            acc <= 8'd1; sq <= base; e <= exp; cnt <= 4'd0; running <= 1'b1;\n        end else if (running & ~((cnt == W) | (e == 8'd0))) begin\n            acc <= e[0] ? (acc + sq) : acc;\n            sq  <= sq + sq;\n            e   <= e >> 1;\n            cnt <= cnt + 4'd1;\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "base",
+   "exp",
+   "modulus"
+  ],
+  "expected": "LEAKY",
+  "module": "modexp_leaky",
+  "pair": "modexp",
+  "role": "negative",
+  "note": "Square-and-multiply: the multiply is skipped on a zero exponent bit, leaking the exponent Hamming weight."
+ },
+ "x25519_fieldmul.v": {
+  "source": "// x25519_fieldmul \u2014 CONSTANT-TIME field multiplication `opa * opb mod modulus`, the inner primitive of an\n// X25519 / Curve25519 Montgomery-ladder step (the field GF(2^255-19), modeled here at a tractable width W).\n// The completion-channel CT ARGUMENT is width-parametric in structure, BUT this committed RTL is fixed at\n// W=16 and its `reg [4:0] cnt` (below) only counts to 31 \u2014 reaching the real W=255 would require widening\n// `cnt` and re-proving the (~16x larger) miter. No W>16 proof exists in this repo; do not claim one.\n//\n// Every cycle doubles the accumulator and CONDITIONALLY ADDS the multiplicand by VALUE-SELECT on the current\n// multiplier bit \u2014 the secret multiplier only selects an operand value, it never gates control flow. The\n// completion signal `done = running & (cnt == W)` is a data-OBLIVIOUS counter: the routine always runs exactly\n// W cycles regardless of the secret operands, so the timing is constant-time (no operand bit reaches the\n// completion cone). Its leaky twin `x25519_fieldmul_leaky.v` early-exits on the multiplier value and is\n// correctly REFUSED by the self-composition proof.\nmodule x25519_fieldmul (clk, rst, start, opa, opb, modulus, done, result);\n    parameter W = 16;\n    input             clk, rst, start;\n    input  [W-1:0]    opa, opb, modulus;   // SECRET field operands (multiplicand, multiplier) + the prime\n    output            done;\n    output [W-1:0]    result;\n\n    reg [W:0]   acc;                        // accumulator with one guard bit for double + add\n    reg [W-1:0] ar, br, mr;                 // latched multiplicand / multiplier / modulus\n    reg [4:0]   cnt;                        // data-OBLIVIOUS cycle counter (0..W), 5 bits covers W<=16\n    reg         running;\n\n    assign done   = running & (cnt == W);   // operand-free completion: exactly W cycles, always\n    assign result = acc[W-1:0];\n\n    always @(posedge clk) begin\n        if (rst) begin\n            acc <= 0; ar <= 0; br <= 0; mr <= 0; cnt <= 5'd0; running <= 1'b0;\n        end else if (start) begin\n            acc <= 0; ar <= opa; br <= opb; mr <= modulus; cnt <= 5'd0; running <= 1'b1;\n        end else if (running & (cnt != W)) begin\n            // MSB-first double-and-add: double the accumulator, VALUE-SELECT add of the multiplicand on the\n            // current multiplier bit \u2014 control never branches on the secret. (A modular reduction on the\n            // guard bit would slot here for the full field; it too is value-select, keeping the cone clean.)\n            acc <= (({acc[W-1:0], 1'b0}) + (br[W-1] ? {1'b0, ar} : 0));\n            br  <= br << 1;\n            cnt <= cnt + 5'd1;               // the ONLY thing gating `done`\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "opa",
+   "opb",
+   "modulus"
+  ],
+  "expected": "CONSTANT_TIME",
+  "module": "x25519_fieldmul",
+  "pair": "x25519",
+  "role": "positive",
+  "note": ""
+ },
+ "x25519_fieldmul_leaky.v": {
+  "source": "// x25519_fieldmul_leaky \u2014 the LEAKY counterpart of `x25519_fieldmul`: it early-exits once the residual\n// multiplier `br` is zero, skipping the remaining doublings, so `done` timing leaks the secret multiplier's\n// most-significant set-bit position (its bit-length). The completion cone therefore contains operand bits, and\n// the self-composition constant-time proof correctly REFUSES to certify it (the teeth).\nmodule x25519_fieldmul_leaky (clk, rst, start, opa, opb, modulus, done, result);\n    parameter W = 16;\n    input             clk, rst, start;\n    input  [W-1:0]    opa, opb, modulus;   // SECRET operands\n    output            done;\n    output [W-1:0]    result;\n\n    reg [W:0]   acc;\n    reg [W-1:0] ar, br, mr;\n    reg         running;\n\n    assign done   = running & (br == 0);    // LEAK: completion depends on the secret multiplier's value\n    assign result = acc[W-1:0];\n\n    always @(posedge clk) begin\n        if (rst) begin\n            acc <= 0; ar <= 0; br <= 0; mr <= 0; running <= 1'b0;\n        end else if (start) begin\n            acc <= 0; ar <= opa; br <= opb; mr <= modulus; running <= 1'b1;\n        end else if (running & (br != 0)) begin\n            acc <= (({acc[W-1:0], 1'b0}) + (br[W-1] ? {1'b0, ar} : 0));\n            br  <= br << 1;                  // early-exit when this hits 0 -> variable, secret-dependent timing\n        end\n    end\nendmodule\n",
+  "observation": "done",
+  "secrets": [
+   "opa",
+   "opb",
+   "modulus"
+  ],
+  "expected": "LEAKY",
+  "module": "x25519_fieldmul_leaky",
+  "pair": "x25519",
+  "role": "negative",
+  "note": ""
+ }
+}

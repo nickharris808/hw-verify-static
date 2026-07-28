@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hw-verify — constant-time checker, in your browser</title>
+<meta name="description" content="Paste Verilog, get a formal constant-time verdict with the leaking signals named. Runs the real analyzer in your browser via Pyodide — nothing is uploaded.">
+<script src="https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.js"></script>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --edge:#262b38; --ink:#e6e9f0; --dim:#9aa3b5;
+    --ok:#3ddc97; --bad:#ff6b6b; --accent:#9d7cff; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 20px 64px}
+  h1{font-size:30px;margin:0 0 6px;letter-spacing:-.02em}
+  .tag{color:var(--accent);font-weight:600}
+  .lede{font-size:18px;color:var(--ink);margin:0 0 18px;max-width:70ch}
+  .sub{color:var(--dim);max-width:72ch;margin:0 0 22px}
+  .grid{display:grid;grid-template-columns:1.35fr .65fr;gap:18px}
+  @media(max-width:860px){.grid{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:16px}
+  label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.08em;
+        color:var(--dim);margin:0 0 6px}
+  textarea,input{width:100%;background:#0c0e14;color:var(--ink);border:1px solid var(--edge);
+        border-radius:8px;padding:10px;font-family:var(--mono);font-size:13px}
+  textarea{height:330px;resize:vertical;white-space:pre;overflow-wrap:normal;overflow-x:auto}
+  button{background:var(--accent);color:#12131a;border:0;border-radius:8px;padding:10px 16px;
+         font-weight:700;cursor:pointer;font-size:14px}
+  button:disabled{opacity:.5;cursor:progress}
+  button.ghost{background:transparent;color:var(--dim);border:1px solid var(--edge);font-weight:500}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .verdict{font-size:22px;font-weight:800;margin:0 0 8px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  pre{background:#0c0e14;border:1px solid var(--edge);border-radius:8px;padding:12px;
+      overflow:auto;font-size:12.5px;margin:10px 0 0}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;margin-top:8px}
+  th,td{border-bottom:1px solid var(--edge);padding:7px 8px;text-align:left}
+  th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+  code{font-family:var(--mono);background:#0c0e14;padding:1px 5px;border-radius:4px;font-size:12.5px}
+  a{color:var(--accent)}
+  .note{color:var(--dim);font-size:13px;margin-top:12px}
+  .boundary{border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin-top:26px;color:var(--dim)}
+  .boundary b{color:var(--ink)}
+  footer{margin-top:34px;padding-top:18px;border-top:1px solid var(--edge);color:var(--dim);font-size:13px}
+  .pill{display:inline-block;background:#0c0e14;border:1px solid var(--edge);border-radius:999px;
+        padding:3px 10px;font-size:12px;color:var(--dim);margin:0 6px 6px 0}
+  #status{color:var(--dim);font-size:13px;margin-left:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>hw&#8209;verify <span class="tag">constant&#8209;time checker</span></h1>
+  <p class="lede">Paste Verilog, get a formal verdict with the <b>leaking signals named</b> — not a guess.</p>
+  <p class="sub">
+    This runs the <b>real analyzer</b> — the same <code>ctbench</code> code you can
+    <code>pip install</code> — compiled to WebAssembly and executed in your browser.
+    Nothing is uploaded. Nothing leaves this page.
+  </p>
+
+  <div>
+    <span class="pill">18 benchmark fixtures bundled</span>
+    <span class="pill">8 matched pairs</span>
+    <span class="pill">no install</span>
+    <span class="pill">no upload</span>
+  </div>
+
+  <div class="grid" style="margin-top:18px">
+    <div class="panel">
+      <label for="src">Verilog&#8209;2001 source</label>
+      <textarea id="src" spellcheck="false"></textarea>
+      <div class="row">
+        <button id="run" disabled>Check</button>
+        <span id="status">loading the analyzer…</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <label for="obs">Completion signal</label>
+      <input id="obs" value="done" spellcheck="false">
+      <label for="sec" style="margin-top:12px">Secret inputs (comma separated)</label>
+      <input id="sec" value="x, y" spellcheck="false">
+      <p class="note">
+        Secrets are a <b>specification choice</b> and are never inferred. Naming them is
+        the point: a tool that guesses produces confident verdicts about the wrong property.
+      </p>
+      <label style="margin-top:14px">Load a bundled fixture</label>
+      <select id="fx" style="width:100%;background:#0c0e14;color:var(--ink);
+              border:1px solid var(--edge);border-radius:8px;padding:9px;font-family:var(--mono);font-size:13px"></select>
+      <div class="row">
+        <button class="ghost" id="load">Load</button>
+        <button class="ghost" id="runall">Run all 18</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="out" style="margin-top:18px">
+    <p class="verdict" id="verdict">—</p>
+    <div id="detail"></div>
+  </div>
+
+  <div class="boundary">
+    <b>The commercial boundary.</b> Everything here analyses a design you disclose in full.
+    Proving a property to a third party who <i>never receives</i> the design — a verdict bound
+    to a commitment of a design that stays hidden — is a different problem, and a commercial
+    one. It is not in any of these packages.
+  </div>
+
+  <footer>
+    <b>Part of the hw-verify toolkit.</b><br>
+    <a href="https://github.com/nickharris808/ctbench">ctbench</a> — matched-pair benchmark + leaderboard ·
+    <a href="https://github.com/nickharris808/patchproof">patchproof</a> — prove a bounds-check fix is complete ·
+    <a href="https://github.com/nickharris808/ct-mask">ct-mask</a> — first-order masking verification<br>
+    <a href="https://github.com/nickharris808/hw-verify-mcp">hw-verify-mcp</a> — MCP server for AI agents ·
+    <a href="https://github.com/nickharris808/ct-audit-action">ct-audit-action</a> — GitHub Action ·
+    <a href="https://huggingface.co/datasets/nickh007/hw-verify">hw-verify dataset</a> — 49 records, 3 splits
+    <p style="margin-top:12px">
+      <b>Scope.</b> Verdicts cover <b>completion timing</b> against the declared secrets — not
+      power, EM, cache, or microarchitectural channels. The analysis is a syntactic fan-in cone
+      including every enclosing <code>if</code>/<code>case</code> guard, so it
+      <b>over-approximates</b>: <code>CONSTANT_TIME</code> is conservative, and
+      <code>LEAKY</code> names the reaching signals so you can confirm rather than take it on faith.
+    </p>
+  </footer>
+</div>
+
+<script>
+let py = null, FX = {};
+
+const EXAMPLE_LEAKY = `// Early-exit tag comparison — the classic timing oracle.
+// \`done\` asserts as soon as a mismatch is found, so completion timing
+// reveals the position of the first differing bit.
+module cmp_leaky (clk, rst, start, x, y, done, equal);
+    parameter W = 8;
+    input          clk, rst, start;
+    input  [W-1:0] x, y;              // SECRET operands
+    output         done;
+    output         equal;
+
+    reg [W-1:0] xr, yr;
+    reg         diff, running;
+
+    assign done  = running & (xr == yr);
+    assign equal = ~diff;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            xr <= 0; yr <= 0; diff <= 1'b0; running <= 1'b0;
+        end else if (start) begin
+            xr <= x; yr <= y; diff <= 1'b0; running <= 1'b1;
+        end else if (running) begin
+            if (xr != yr) begin
+                diff    <= 1'b1;
+                running <= 1'b0;      // <-- early exit: timing depends on operands
+            end
+        end
+    end
+endmodule
+`;
+
+function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+async function boot(){
+  py = await loadPyodide();
+  const cone = await (await fetch("cone.py")).text();
+  FX = await (await fetch("fixtures.json")).json();
+  py.FS.writeFile("cone.py", cone);
+  py.runPython("import sys; sys.path.insert(0,'.'); import cone");
+  const sel = document.getElementById("fx");
+  Object.keys(FX).sort().forEach(k=>{
+    const o = document.createElement("option");
+    o.value = k; o.textContent = k + "  (" + FX[k].expected + ")";
+    sel.appendChild(o);
+  });
+  document.getElementById("src").value = EXAMPLE_LEAKY;
+  document.getElementById("run").disabled = false;
+  document.getElementById("status").textContent = "analyzer ready — runs locally";
+}
+
+function analyse(src, obs, secrets){
+  py.globals.set("_src", src);
+  py.globals.set("_obs", obs);
+  py.globals.set("_sec", secrets);
+  return py.runPython(`
+import json, cone
+try:
+    v = cone.analyse(_src, _obs, list(_sec))
+    json.dumps(v.to_dict())
+except Exception as e:
+    json.dumps({"error": str(e)})
+`);
+}
+
+function render(res){
+  const v = document.getElementById("verdict");
+  const d = document.getElementById("detail");
+  if(res.error){
+    v.textContent = "Could not analyse"; v.className = "verdict bad";
+    d.innerHTML = "<pre>" + esc(res.error) + "</pre>"; return;
+  }
+  if(res.verdict === "CONSTANT_TIME"){
+    v.textContent = "✅ CONSTANT_TIME"; v.className = "verdict ok";
+    d.innerHTML = "<p>No declared secret reaches <code>" + esc(res.observation) +
+      "</code>. Its fan-in cone spans <b>" + res.cone_size +
+      " signals</b> and contains none of " +
+      res.secrets.map(s=>"<code>"+esc(s)+"</code>").join(", ") + ".</p>" +
+      "<pre>" + esc(JSON.stringify(res, null, 2)) + "</pre>";
+  } else {
+    v.textContent = "❌ LEAKY"; v.className = "verdict bad";
+    d.innerHTML = "<p><code>" + esc(res.observation) + "</code> depends on " +
+      res.reaching_secrets.map(s=>"<code>"+esc(s)+"</code>").join(", ") +
+      ". The cycle it asserts on is a function of secret data, so timing reveals " +
+      "secret-dependent behaviour.</p><p><b>Fix:</b> make the completion condition a " +
+      "function of a data-oblivious counter and drop the early-exit branch, then re-run.</p>" +
+      "<pre>" + esc(JSON.stringify(res, null, 2)) + "</pre>";
+  }
+}
+
+document.getElementById("run").onclick = ()=>{
+  const secrets = document.getElementById("sec").value.split(",").map(s=>s.trim()).filter(Boolean);
+  if(!secrets.length){
+    document.getElementById("verdict").textContent = "No secrets declared";
+    document.getElementById("verdict").className = "verdict bad";
+    document.getElementById("detail").innerHTML =
+      "<p>Secrets are a specification choice and are never inferred. Name the inputs " +
+      "carrying sensitive values — for the bundled example, <code>x, y</code>.</p>";
+    return;
+  }
+  render(JSON.parse(analyse(document.getElementById("src").value,
+                            document.getElementById("obs").value || "done", secrets)));
+};
+
+document.getElementById("load").onclick = ()=>{
+  const k = document.getElementById("fx").value, f = FX[k];
+  document.getElementById("src").value = f.source;
+  document.getElementById("obs").value = f.observation;
+  document.getElementById("sec").value = f.secrets.join(", ");
+};
+
+document.getElementById("runall").onclick = ()=>{
+  let rows = "<table><tr><th>Fixture</th><th>Verdict</th><th>Expected</th><th>Reaching secrets</th></tr>";
+  let ok = 0, n = 0;
+  for(const k of Object.keys(FX).sort()){
+    const f = FX[k];
+    const r = JSON.parse(analyse(f.source, f.observation, f.secrets));
+    n++;
+    const good = r.verdict === f.expected; if(good) ok++;
+    rows += "<tr><td><code>" + esc(k) + "</code></td><td class='" + (good?"ok":"bad") + "'>" +
+            esc(r.verdict||"error") + "</td><td>" + esc(f.expected) + "</td><td>" +
+            ((r.reaching_secrets||[]).map(esc).join(", ") || "—") + "</td></tr>";
+  }
+  rows += "</table>";
+  document.getElementById("verdict").textContent = ok + "/" + n + " correct on the bundled benchmark";
+  document.getElementById("verdict").className = "verdict " + (ok===n?"ok":"bad");
+  document.getElementById("detail").innerHTML = rows +
+    "<p class='note'>Every constant-time fixture has a leaky twin with an identical module " +
+    "interface. A tool earns a pair only by calling the safe one safe <b>and</b> the leaky " +
+    "one leaky. <code>barrett_buggy</code> is the out-of-remit control: genuinely " +
+    "constant-time and functionally wrong — flagging it is crying wolf.</p>";
+};
+
+boot();
+</script>
+</body>
+</html>
