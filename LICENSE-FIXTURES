@@ -1,0 +1,43 @@
+# Licensing of the bundled RTL
+
+This Space ships two kinds of material under two different licences. The `LICENSE`
+file (Apache-2.0) does **not** cover all of it.
+
+## 1. Apache License 2.0
+
+- `index.html` — the page and its demo logic.
+- `cone.py` — a verbatim vendored copy of the cone-of-influence analyzer from
+  [ctbench](https://github.com/nickharris808/ctbench), which is Apache-2.0.
+
+See `LICENSE`.
+
+## 2. Creative Commons Attribution 4.0 International
+
+The **18 Verilog sources inlined in `fixtures.json`** are licensed **CC-BY-4.0**:
+<https://creativecommons.org/licenses/by/4.0/>
+
+They are the scored half of the ctbench corpus. Attribution is the only condition —
+cite ctbench if you reuse them:
+
+    ctbench: a matched-pair constant-time RTL benchmark corpus, version 1.0.0.
+    https://github.com/nickharris808/ctbench
+
+## 3. Runtime dependency — Pyodide (not bundled)
+
+The page loads Pyodide from a version-pinned CDN
+(`https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.js`). Pyodide is distributed
+under the **Mozilla Public License 2.0**. It is fetched by the browser at runtime and
+is not redistributed as part of this Space.
+
+## What is *not* bundled here
+
+ctbench additionally contains four fixtures derived from the
+[picorv32](https://github.com/YosysHQ/picorv32) project by Claire Wolf, which remain
+under the upstream **ISC** licence: `pcpi_div.v`, `pcpi_mul.v`, `pcpi_div_wiped.v`,
+and `pcpi_div_halfwipe.v`.
+
+**None of those four ship in this Space.** They are *unscored* in ctbench — their
+observable is a secret-residue property rather than a completion signal — and this
+demo bundles only the 18 scored fixtures. If you need them, take them from the
+[ctbench repository](https://github.com/nickharris808/ctbench), where the full ISC
+notice travels with them in `LICENSE-FIXTURES`.
