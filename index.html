@@ -9,7 +9,7 @@
 <style>
   :root{
     --bg:#0f1117; --panel:#171a23; --edge:#262b38; --ink:#e6e9f0; --dim:#9aa3b5;
-    --ok:#3ddc97; --bad:#ff6b6b; --accent:#9d7cff; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --ok:#3ddc97; --bad:#ff6b6b; --warn:#e0a83a; --accent:#9d7cff; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
@@ -33,7 +33,7 @@
   button.ghost{background:transparent;color:var(--dim);border:1px solid var(--edge);font-weight:500}
   .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
   .verdict{font-size:22px;font-weight:800;margin:0 0 8px}
-  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
   pre{background:#0c0e14;border:1px solid var(--edge);border-radius:8px;padding:12px;
       overflow:auto;font-size:12.5px;margin:10px 0 0}
   table{border-collapse:collapse;width:100%;font-size:13.5px;margin-top:8px}
@@ -120,9 +120,19 @@
     <p style="margin-top:12px">
       <b>Scope.</b> Verdicts cover <b>completion timing</b> against the declared secrets — not
       power, EM, cache, or microarchitectural channels. The analysis is a syntactic fan-in cone
-      including every enclosing <code>if</code>/<code>case</code> guard, so it
-      <b>over-approximates</b>: <code>CONSTANT_TIME</code> is conservative, and
-      <code>LEAKY</code> names the reaching signals so you can confirm rather than take it on faith.
+      including every enclosing <code>if</code>/<code>case</code> guard, so within the
+      supported subset it <b>over-approximates</b>: <code>CONSTANT_TIME</code> is
+      conservative there, and <code>LEAKY</code> names the reaching signals so you can
+      confirm rather than take it on faith.
+    </p>
+    <p>
+      <b>The supported subset</b> is one flat module of <code>assign</code> statements,
+      net declarations with initialisers, and <code>always</code> blocks. Submodule
+      instantiations, <code>for</code> loops, <code>generate</code>, <code>function</code>
+      and <code>task</code> definitions, and preprocessor macros are <b>not</b> read — each
+      would hide dependency edges, and a hidden edge makes a leaky design look safe. Rather
+      than analyse what it can and stay quiet about the rest, the checker returns
+      <code>UNKNOWN</code> and says which construct stopped it. <b>UNKNOWN is not a pass.</b>
     </p>
   </footer>
 </div>
@@ -187,7 +197,9 @@ function analyse(src, obs, secrets){
   return py.runPython(`
 import json, cone
 try:
-    v = cone.analyse(_src, _obs, list(_sec))
+    # check(), not analyse(): a design the analysis cannot read comes back as an
+    # explicit UNKNOWN verdict rather than raising, so the page can say so plainly.
+    v = cone.check(_src, _obs, list(_sec))
     json.dumps(v.to_dict())
 except Exception as e:
     json.dumps({"error": str(e)})
@@ -200,6 +212,21 @@ function render(res){
   if(res.error){
     v.textContent = "Could not analyse"; v.className = "verdict bad";
     d.innerHTML = "<pre>" + esc(res.error) + "</pre>"; return;
+  }
+  if(res.verdict === "UNKNOWN"){
+    // Neither green nor red. Rendering this as CONSTANT_TIME would claim safety the
+    // analysis never established; rendering it as LEAKY would claim a leak it never
+    // found. It is the absence of a verdict, and it says so.
+    v.textContent = "⚠️ UNKNOWN — no verdict"; v.className = "verdict warn";
+    d.innerHTML = "<p><b>This design has not been shown to be constant-time.</b> " +
+      "The checker could not read it, so it declined to answer rather than guess.</p>" +
+      "<p>" + esc(res.reason || "") + "</p>" +
+      "<p>The analysis reads a single flat module of <code>assign</code> statements " +
+      "and <code>always</code> blocks. Submodule instantiations, <code>for</code> " +
+      "loops, <code>generate</code>, <code>function</code> and macros hide dependency " +
+      "edges — and a hidden edge would make a leaky design look safe.</p>" +
+      "<pre>" + esc(JSON.stringify(res, null, 2)) + "</pre>";
+    return;
   }
   if(res.verdict === "CONSTANT_TIME"){
     v.textContent = "✅ CONSTANT_TIME"; v.className = "verdict ok";

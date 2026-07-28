@@ -67,8 +67,11 @@ The checker takes the fan-in cone of the completion signal — **including every
 it with the secrets you declare. Secrets are **never inferred**: guessing which inputs are
 sensitive produces confident verdicts about the wrong property.
 
-It **over-approximates**, so `CONSTANT_TIME` is conservative and `LEAKY` names the reaching
-signals so you can confirm rather than take it on faith.
+Within the supported subset it **over-approximates**, so `CONSTANT_TIME` is conservative
+there and `LEAKY` names the reaching signals so you can confirm rather than take it on
+faith. A design it cannot read — a submodule instantiation, a `for` loop, `generate`, a
+`function`, a macro — returns **`UNKNOWN`** with the reason, in its own amber panel.
+**`UNKNOWN` is not a pass.**
 
 ## Example output
 

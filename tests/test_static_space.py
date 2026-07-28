@@ -227,3 +227,56 @@ def test_card_does_not_overclaim_isc_content(card):
     assert i != -1
     lic = body[i:]
     assert "not bundled here" in lic, "the card must say the ISC fixtures are absent"
+
+
+# ---------------------------------------------------------------------------
+# The refusal path must reach the page, not just the library.
+# ---------------------------------------------------------------------------
+
+def test_page_calls_check_not_analyse(html):
+    """`analyse` raises; `check` returns UNKNOWN.
+
+    Calling `analyse` here would surface a Python traceback in the error box for
+    every hierarchical design a visitor pastes, instead of the explanation.
+    """
+    assert "cone.check(" in html, "index.html must call cone.check for an UNKNOWN verdict"
+
+
+def test_page_renders_unknown_as_neither_pass_nor_leak(html):
+    """UNKNOWN must have its own branch before the CONSTANT_TIME/LEAKY split.
+
+    The original render was a two-way if/else, so anything that was not
+    CONSTANT_TIME fell through to the red LEAKY panel — over-claiming a leak the
+    analysis never found, having previously under-claimed with a green pass.
+    """
+    assert 'res.verdict === "UNKNOWN"' in html
+    assert "no verdict" in html
+    assert "verdict warn" in html
+    # the UNKNOWN branch must come first and return, so it cannot fall through
+    i_unknown = html.index('res.verdict === "UNKNOWN"')
+    i_ct = html.index('res.verdict === "CONSTANT_TIME"')
+    assert i_unknown < i_ct, "the UNKNOWN branch must precede the CONSTANT_TIME branch"
+
+
+def test_page_states_the_supported_subset_and_that_unknown_is_not_a_pass(html):
+    for phrase in ("supported subset", "UNKNOWN is not a pass", "instantiations"):
+        assert phrase in html, f"index.html omits {phrase!r}"
+
+
+def test_the_warn_colour_token_exists(html):
+    """A class with no colour renders as body text and reads as neutral."""
+    assert "--warn:" in html and ".warn{color:var(--warn)}" in html
+
+
+def test_an_unreadable_design_gets_UNKNOWN_through_the_vendored_analyzer():
+    """End-to-end through exactly the code the browser runs."""
+    src = (
+        "module top(clk, key, done);\n"
+        "  input clk; input [7:0] key; output done;\n"
+        "  child u_child (.clk(clk), .key(key), .done(done));\n"
+        "endmodule\n"
+    )
+    v = cone.check(src, "done", ["key"], "top")
+    assert v.status == "UNKNOWN"
+    assert v.constant_time is False
+    assert v.reason
